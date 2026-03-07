@@ -1,4 +1,4 @@
-// 1:1 port of tool_calling/example/get_weather.py
+// Single-chat example: ask for weather in two cities, LLM calls get_weather in parallel.
 package main
 
 import (
@@ -15,12 +15,12 @@ import (
 
 func getWeather(args map[string]any) (string, error) {
 	city, _ := args["city"].(string)
-	return fmt.Sprintf("城市 %s 的天气是晴朗，气温20度，湿度50%%，风力2级，空气质量优。", city), nil
+	return fmt.Sprintf("The weather in %s is sunny, 20°C, humidity 50%%, wind level 2, air quality excellent.", city), nil
 }
 
 func main() {
 	if err := godotenv.Load(".env"); err != nil {
-		log.Println("未找到 .env，继续使用系统环境变量")
+		log.Println("No .env found, falling back to system environment variables")
 	}
 
 	config := tc.LLMConfig{
@@ -32,14 +32,14 @@ func main() {
 	agent := tc.NewAgent(config)
 	agent.AddTool(tc.Tool{
 		Name:        "get_weather",
-		Description: "获取天气",
+		Description: "Get the current weather for a given city",
 		Function:    getWeather,
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"city": map[string]any{
 					"type":        "string",
-					"description": "城市名称",
+					"description": "City name",
 				},
 			},
 			"required": []any{"city"},
@@ -47,7 +47,7 @@ func main() {
 	})
 
 	observations := []openai.ChatCompletionMessageParamUnion{
-		openai.UserMessage("请获取北京和杭州各自的天气，并行调用工具get_weather"),
+		openai.UserMessage("Get the weather for Beijing and Hangzhou. Call get_weather in parallel."),
 	}
 
 	result, err := agent.Chat(context.Background(), observations)
