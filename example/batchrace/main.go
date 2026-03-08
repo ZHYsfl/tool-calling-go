@@ -69,6 +69,12 @@ func newFacultySite(name string, delay time.Duration, hasTarget bool) *facultySi
 func scrapeFacultyPage(ctx context.Context, args map[string]any) (string, error) {
 	url, _ := args["url"].(string)
 	targetName, _ := args["target_name"].(string)
+	facultyName, _ := args["faculty_name"].(string)
+
+	tc.ReportProgress(ctx, "loading website", map[string]any{
+		"faculty": facultyName,
+		"url":     url,
+	})
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -84,15 +90,25 @@ func scrapeFacultyPage(ctx context.Context, args map[string]any) (string, error)
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		return "", fmt.Errorf("decode response: %w", err)
 	}
+	tc.ReportProgress(ctx, "parsing faculty roster", map[string]any{
+		"faculty": payload.Faculty,
+	})
 
 	for _, t := range payload.Teachers {
 		if strings.EqualFold(t.Name, targetName) {
+			tc.ReportProgress(ctx, "target matched", map[string]any{
+				"faculty": payload.Faculty,
+				"name":    t.Name,
+			})
 			return fmt.Sprintf(
 				`{"status":"found","faculty":"%s","teacher":"%s","position":"%s","research":"%s"}`,
 				payload.Faculty, t.Name, t.Position, t.Research,
 			), nil
 		}
 	}
+	tc.ReportProgress(ctx, "target not found", map[string]any{
+		"faculty": payload.Faculty,
+	})
 	return fmt.Sprintf(`{"status":"not_found","faculty":"%s","teacher":"%s"}`, payload.Faculty, targetName), nil
 }
 
@@ -122,10 +138,15 @@ func main() {
 					"type":        "string",
 					"description": "Teacher name to search for",
 				},
+				"faculty_name": map[string]any{
+					"type":        "string",
+					"description": "Faculty name for telemetry",
+				},
 			},
-			"required": []any{"url", "target_name"},
+			"required": []any{"url", "target_name", "faculty_name"},
 		},
 	})
+	orch := tc.NewOrchestrationAgent(agent)
 
 	sites := []*facultySite{
 		newFacultySite("Computer Science", 1300*time.Millisecond, false),
@@ -144,18 +165,23 @@ func main() {
 	}
 
 	target := "Zhang Wei"
-	observations := make([][]openai.ChatCompletionMessageParamUnion, len(sites))
+	tasks := make([]tc.RaceTask, len(sites))
 	var estimatedSerial time.Duration
 	for i, s := range sites {
 		estimatedSerial += s.Delay
 		prompt := fmt.Sprintf(
 			"You are agent_%d. Check only this faculty page for teacher %q.\n"+
-				"Call scrape_faculty_page with url=%q and target_name=%q.\n"+
+				"Call scrape_faculty_page with url=%q, target_name=%q and faculty_name=%q.\n"+
 				"If found, respond with JSON containing status=found, faculty, position, research.\n"+
 				"If not found, respond with JSON containing status=not_found and faculty.",
-			i, target, s.Server.URL, target,
+			i, target, s.Server.URL, target, s.Name,
 		)
-		observations[i] = []openai.ChatCompletionMessageParamUnion{openai.UserMessage(prompt)}
+		tasks[i] = tc.RaceTask{
+			ID: fmt.Sprintf("agent_%d_%s", i, strings.ToLower(strings.ReplaceAll(s.Name, " ", "_"))),
+			Messages: []openai.ChatCompletionMessageParamUnion{
+				openai.UserMessage(prompt),
+			},
+		}
 	}
 
 	successCond := func(msgs []openai.ChatCompletionMessageParamUnion) bool {
@@ -173,16 +199,28 @@ func main() {
 	timeoutCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
+	allEvents, unsubscribeAll := orch.SubscribeAllRuns(1024)
+
+	eventsDone := make(chan struct{})
+	go func() {
+		defer close(eventsDone)
+		for ev := range allEvents {
+			log.Printf("[run=%s event=%s task=%s idx=%d] %s data=%v", ev.RunID, ev.Type, ev.TaskID, ev.TaskIndex, ev.Message, ev.Data)
+			if ev.Type == tc.EventRunCompleted {
+				return
+			}
+		}
+	}()
+
 	start := time.Now()
-	result, err := tc.BatchRace(
+	result, err := orch.RunManagedRace(
 		timeoutCtx,
-		agent,
-		observations,
-		successCond,
-		tc.WithMaxConcurrent(len(observations)),
-		tc.WithEventHandler(func(e tc.RaceEvent) {
-			log.Printf("[event=%s] agent=%d %s", e.Type, e.AgentID, e.Message)
-		}),
+		tasks,
+		tc.OrchestrationRunConfig{
+			SuccessCond:         successCond,
+			MaxConcurrent:       len(tasks),
+			TerminateAckTimeout: 5 * time.Second,
+		},
 	)
 	elapsed := time.Since(start)
 
@@ -192,12 +230,23 @@ func main() {
 	fmt.Println(strings.Repeat("=", 80))
 
 	if err != nil {
-		log.Fatalf("BatchRace failed: %v", err)
+		log.Printf("Managed race finished without winner: %v", err)
 	}
 
-	last := result.Messages[len(result.Messages)-1]
-	if last.OfAssistant != nil && last.OfAssistant.Content.OfString.Valid() {
-		fmt.Printf("Winner agent index: %d\n", result.Index)
-		fmt.Printf("Final answer: %s\n", last.OfAssistant.Content.OfString.Value)
+	unsubscribeAll()
+	<-eventsDone
+
+	if result.Winner != nil {
+		last := result.Winner.Messages[len(result.Winner.Messages)-1]
+		if last.OfAssistant != nil && last.OfAssistant.Content.OfString.Valid() {
+			fmt.Printf("Winner task ID: %s\n", result.Winner.TaskID)
+			fmt.Printf("Winner index: %d\n", result.Winner.Index)
+			fmt.Printf("Final answer: %s\n", last.OfAssistant.Content.OfString.Value)
+		}
+	}
+
+	status, ok := orch.GetRunStatus(result.RunID)
+	if ok {
+		fmt.Printf("Run status: %s, terminate_sent=%d, terminate_ack=%d\n", status.State, status.TerminateSent, status.TerminateAck)
 	}
 }
