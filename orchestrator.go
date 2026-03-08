@@ -33,6 +33,7 @@ type OrchestrationRaceResult struct {
 type OrchestrationAgent struct {
 	controller *Agent
 	worker     *Agent
+	executor   WorkerExecutor
 	bus        *OrchestrationBus
 	runs       map[string]*OrchestrationRunStatus
 	runsMu     sync.RWMutex
@@ -50,6 +51,7 @@ func NewOrchestrationAgent(agent *Agent) *OrchestrationAgent {
 	return &OrchestrationAgent{
 		controller: agent,
 		worker:     agent,
+		executor:   InProcessWorkerExecutor{},
 		bus:        newOrchestrationBus(),
 		runs:       make(map[string]*OrchestrationRunStatus),
 	}
@@ -65,11 +67,28 @@ func (o *OrchestrationAgent) SetWorkerAgent(agent *Agent) {
 	o.worker = agent
 }
 
+// SetWorkerExecutor sets how sub-tasks are executed.
+// Use this to swap in process-based or remote executors.
+func (o *OrchestrationAgent) SetWorkerExecutor(executor WorkerExecutor) {
+	if executor == nil {
+		o.executor = InProcessWorkerExecutor{}
+		return
+	}
+	o.executor = executor
+}
+
 func (o *OrchestrationAgent) workerAgent() *Agent {
 	if o.worker != nil {
 		return o.worker
 	}
 	return o.controller
+}
+
+func (o *OrchestrationAgent) workerExecutor() WorkerExecutor {
+	if o.executor != nil {
+		return o.executor
+	}
+	return InProcessWorkerExecutor{}
 }
 
 // AddTool registers a tool on the orchestration controller agent.

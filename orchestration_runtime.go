@@ -339,7 +339,7 @@ func (o *OrchestrationAgent) RunManagedRace(
 				})
 			})
 
-			msgs, err := o.workerAgent().Chat(taskCtx, t.Messages)
+			msgs, err := o.workerExecutor().ExecuteTask(taskCtx, o.workerAgent(), t)
 			if err != nil {
 				if ctx.Err() != nil {
 					resultCh <- orchestrationResultItem{

@@ -9,6 +9,7 @@ A Go implementation of the `tool_calling` SDK. Built on [openai-go/v3](https://g
 - **BatchRace** — Run many Agent.Chat sessions concurrently and stop others immediately when one succeeds (cascading termination)
 - **OrchestrationAgent** — A higher-level wrapper that treats BatchRace as orchestration primitive
 - **Managed Orchestration Runtime** — Run IDs, realtime event bus, task status table, terminate/terminated_ack protocol
+- **Pluggable WorkerExecutor** — In-process by default; can be replaced with process/remote executors
 - **Parallel tool execution** — Multiple tool calls in a single turn are dispatched via goroutines
 
 ## Directory Layout
@@ -21,6 +22,7 @@ tool_calling_go/
 ├── orchestrator.go       # High-level orchestration wrapper over BatchRace
 ├── orchestration_runtime.go # Realtime orchestration control plane (events/status/acks)
 ├── progress.go           # Tool-level progress reporting helper via context
+├── worker_executor.go    # Pluggable sub-task execution backends
 ├── go.mod / go.sum       # Dependencies
 ├── .env.example                  # Environment variables (API_KEY / MODEL / BASE_URL)
 └── example/
@@ -164,6 +166,9 @@ result, err := orch.RunManagedRace(ctx, tasks, OrchestrationRunConfig{
     MaxConcurrent:       10,
     TerminateAckTimeout: 5 * time.Second,
 })
+
+// Optional: replace executor (default: InProcessWorkerExecutor)
+orch.SetWorkerExecutor(InProcessWorkerExecutor{})
 status, ok := orch.GetRunStatus(result.RunID)
 events, unsub := orch.SubscribeRun(result.RunID, 256)
 defer unsub()
@@ -379,6 +384,9 @@ result, err := orch.RunManagedRace(ctx, tasks, OrchestrationRunConfig{
     MaxConcurrent:       10,
     TerminateAckTimeout: 5 * time.Second,
 })
+
+// 可选：替换任务执行后端（默认 InProcessWorkerExecutor）
+orch.SetWorkerExecutor(InProcessWorkerExecutor{})
 status, ok := orch.GetRunStatus(result.RunID)
 events, unsub := orch.SubscribeRun(result.RunID, 256)
 defer unsub()
