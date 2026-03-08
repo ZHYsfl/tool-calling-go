@@ -6,6 +6,7 @@ A Go implementation of the `tool_calling` SDK. Built on [openai-go/v3](https://g
 
 - **Agent** — LLM chat with automatic tool-call loop and error retry
 - **Batch** — Run many Agent.Chat sessions concurrently with bounded parallelism
+- **BatchRace** — Run many Agent.Chat sessions concurrently and stop others immediately when one succeeds (cascading termination)
 - **Parallel tool execution** — Multiple tool calls in a single turn are dispatched via goroutines
 
 ## Directory Layout
@@ -14,11 +15,13 @@ A Go implementation of the `tool_calling` SDK. Built on [openai-go/v3](https://g
 tool_calling_go/
 ├── agent.go              # Core: LLMConfig / Tool / Agent / Chat
 ├── batch.go              # Batch concurrent dispatch
+├── race.go               # BatchRace competitive dispatch with cascading termination
 ├── go.mod / go.sum       # Dependencies
 ├── .env.example                  # Environment variables (API_KEY / MODEL / BASE_URL)
 └── example/
     ├── getweather/       # Single-chat example
-    └── batchuse/         # 50-way concurrent batch example
+    ├── batchuse/         # 50-way concurrent batch example
+    └── batchrace/        # Multi-site search race example
 ```
 
 ## Quick Start
@@ -49,6 +52,9 @@ go run ./example/getweather
 
 # Batch (50 concurrent chats)
 go run ./example/batchuse
+
+# BatchRace (parallel search + cascading termination)
+go run ./example/batchrace
 ```
 
 ## API Reference
@@ -74,7 +80,7 @@ type Tool struct {
     Parameters  map[string]any      // JSON Schema for parameters
 }
 
-type ToolFunc func(args map[string]any) (string, error)
+type ToolFunc func(ctx context.Context, args map[string]any) (string, error)
 ```
 
 ### Agent
@@ -99,6 +105,53 @@ messages, err := agent.Chat(ctx, []openai.ChatCompletionMessageParamUnion{
 ```go
 // Run multiple chats concurrently; maxConcurrent controls parallelism
 results, err := Batch(ctx, agent, observations, maxConcurrent)
+```
+
+### BatchRace
+
+```go
+successCond := func(messages []openai.ChatCompletionMessageParamUnion) bool {
+    // user-defined success criterion
+    return true
+}
+
+result, err := BatchRace(
+    ctx,
+    agent,
+    observations,
+    successCond,
+    WithMaxConcurrent(10),       // optional
+    WithEventHandler(func(e RaceEvent) {
+        // optional: realtime progress callback
+        fmt.Printf("[%s] agent=%d %s\n", e.Type, e.AgentID, e.Message)
+    }),
+)
+```
+
+`RaceEvent.Type` values:
+
+- `started` — task started
+- `success` — task satisfied `SuccessCondition`
+- `no_match` — task completed but did not satisfy `SuccessCondition`
+- `error` — task failed with a non-cancellation error
+- `cancelled` — task stopped by cascading cancellation
+
+## Migration Notes (Breaking Change)
+
+`ToolFunc` now receives `context.Context` so tools can react to timeout/cancellation:
+
+```go
+// before
+func myTool(args map[string]any) (string, error)
+
+// after
+func myTool(ctx context.Context, args map[string]any) (string, error)
+```
+
+For HTTP tools, bind requests to `ctx`:
+
+```go
+req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 ```
 
 ## How It Works
@@ -140,6 +193,7 @@ Return full conversation history
 
 - **Agent** — LLM 对话 + 自动工具调用循环 + 错误自动重试
 - **Batch** — 批量并发调用多个 Agent.Chat，带信号量限流
+- **BatchRace** — 竞速并发调用，任一任务成功后立即级联终止其他任务
 - **并行工具执行** — 同一轮多个 tool call 通过 goroutine 并行执行
 
 ## 目录结构
@@ -148,11 +202,13 @@ Return full conversation history
 tool_calling_go/
 ├── agent.go              # 核心：LLMConfig / Tool / Agent / Chat
 ├── batch.go              # Batch 批量并发调度
+├── race.go               # BatchRace 竞速调度与级联终止
 ├── go.mod / go.sum       # 依赖管理
 ├── .env.example          # 环境变量模板（API_KEY / MODEL / BASE_URL）
 └── example/
     ├── getweather/       # 单次对话示例
-    └── batchuse/         # 50 路并发批量示例
+    ├── batchuse/         # 50 路并发批量示例
+    └── batchrace/        # 多站点搜索竞速示例
 ```
 
 ## 快速开始
@@ -181,6 +237,9 @@ go run ./example/getweather
 
 # 批量并发（50 个问题，最多 50 路并发）
 go run ./example/batchuse
+
+# 竞速并发（找到即停）
+go run ./example/batchrace
 ```
 
 ## API 参考
@@ -206,7 +265,7 @@ type Tool struct {
     Parameters  map[string]any      // JSON Schema 参数定义
 }
 
-type ToolFunc func(args map[string]any) (string, error)
+type ToolFunc func(ctx context.Context, args map[string]any) (string, error)
 ```
 
 ### Agent
@@ -231,6 +290,53 @@ messages, err := agent.Chat(ctx, []openai.ChatCompletionMessageParamUnion{
 ```go
 // 批量并发调用；maxConcurrent 控制最大并行数
 results, err := Batch(ctx, agent, observations, maxConcurrent)
+```
+
+### BatchRace
+
+```go
+successCond := func(messages []openai.ChatCompletionMessageParamUnion) bool {
+    // 由业务定义“成功条件”
+    return true
+}
+
+result, err := BatchRace(
+    ctx,
+    agent,
+    observations,
+    successCond,
+    WithMaxConcurrent(10),       // 可选
+    WithEventHandler(func(e RaceEvent) {
+        // 可选：实时进度回调
+        fmt.Printf("[%s] agent=%d %s\n", e.Type, e.AgentID, e.Message)
+    }),
+)
+```
+
+`RaceEvent.Type` 状态值：
+
+- `started`：任务已启动
+- `success`：任务满足 `SuccessCondition`
+- `no_match`：任务执行完成但不满足 `SuccessCondition`
+- `error`：任务出现非取消类错误
+- `cancelled`：任务被级联取消
+
+## 迁移说明（破坏性变更）
+
+`ToolFunc` 新增 `context.Context` 参数，用于超时/取消信号透传：
+
+```go
+// 旧签名
+func myTool(args map[string]any) (string, error)
+
+// 新签名
+func myTool(ctx context.Context, args map[string]any) (string, error)
+```
+
+HTTP 工具建议使用 `ctx` 绑定请求：
+
+```go
+req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 ```
 
 ## 调用流程

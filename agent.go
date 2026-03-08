@@ -28,7 +28,7 @@ type LLMConfig struct {
 	ExtraBody map[string]any
 }
 
-type ToolFunc func(args map[string]any) (string, error)
+type ToolFunc func(ctx context.Context, args map[string]any) (string, error)
 
 type Tool struct {
 	Name        string
@@ -127,6 +127,7 @@ func (a *Agent) getTools() []openai.ChatCompletionToolUnionParam {
 }
 
 func (a *Agent) executeToolCall(
+	ctx context.Context,
 	toolCall openai.ChatCompletionMessageToolCallUnion,
 	availableFunctions map[string]ToolFunc,
 ) toolExecResult {
@@ -189,7 +190,7 @@ func (a *Agent) executeToolCall(
 		fmt.Printf("[DEBUG] Executing %s with args: %v\n", funcName, keys)
 	}
 
-	result, err := fn(args)
+	result, err := fn(ctx, args)
 	if err != nil {
 		content := fmt.Sprintf("[EXEC_ERROR] Execution failed: %v", err)
 		if a.debug {
@@ -215,6 +216,7 @@ func (a *Agent) executeToolCall(
 }
 
 func (a *Agent) getToolResponseObservations(
+	ctx context.Context,
 	toolCalls []openai.ChatCompletionMessageToolCallUnion,
 ) []toolExecResult {
 	availableFunctions := make(map[string]ToolFunc, len(a.tools))
@@ -228,7 +230,7 @@ func (a *Agent) getToolResponseObservations(
 		wg.Add(1)
 		go func(idx int, call openai.ChatCompletionMessageToolCallUnion) {
 			defer wg.Done()
-			results[idx] = a.executeToolCall(call, availableFunctions)
+			results[idx] = a.executeToolCall(ctx, call, availableFunctions)
 		}(i, tc)
 	}
 	wg.Wait()
@@ -314,9 +316,13 @@ func (a *Agent) Chat(
 	retryCount := 0
 
 	for resp.Choices[0].FinishReason == "tool_calls" {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
 		next = append(next, assistantMsgToParam(resp.Choices[0].Message))
 
-		toolResults := a.getToolResponseObservations(resp.Choices[0].Message.ToolCalls)
+		toolResults := a.getToolResponseObservations(ctx, resp.Choices[0].Message.ToolCalls)
 		for _, tr := range toolResults {
 			next = append(next, tr.message)
 		}

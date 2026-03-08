@@ -14,7 +14,7 @@ import (
 	tc "toolcalling"
 )
 
-func getWeather(args map[string]any) (string, error) {
+func getWeather(_ context.Context, args map[string]any) (string, error) {
 	city, _ := args["city"].(string)
 	return fmt.Sprintf("The weather in %s is sunny, 20°C, humidity 50%%, wind level 2, air quality excellent.", city), nil
 }
