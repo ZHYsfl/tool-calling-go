@@ -23,3 +23,5 @@ Thumbs.db
 vendor/
 
 .env
+.cursorindexingignore
+.specstory/

@@ -1,3 +1,7 @@
+// orchestration_runtime.go contains the RunManagedRace engine and internal
+// state-management helpers. This is the "control plane loop" that drives
+// dynamic task startup, cascading termination, event emission, and winner
+// aggregation.
 package toolcalling
 
 import (
@@ -9,170 +13,17 @@ import (
 	"github.com/openai/openai-go/v3"
 )
 
-type OrchestrationEventType string
-
-const (
-	EventRunStarted    OrchestrationEventType = "run_started"
-	EventTaskStarted   OrchestrationEventType = "task_started"
-	EventTaskProgress  OrchestrationEventType = "task_progress"
-	EventTargetFound   OrchestrationEventType = "target_found"
-	EventTerminateSent OrchestrationEventType = "terminate_sent"
-	EventTerminatedAck OrchestrationEventType = "terminated_ack"
-	EventTaskCompleted OrchestrationEventType = "task_completed"
-	EventTaskError     OrchestrationEventType = "task_error"
-	EventRunCompleted  OrchestrationEventType = "run_completed"
-)
-
-type TaskState string
-
-const (
-	TaskPending    TaskState = "pending"
-	TaskRunning    TaskState = "running"
-	TaskFound      TaskState = "found"
-	TaskNoMatch    TaskState = "no_match"
-	TaskError      TaskState = "error"
-	TaskTerminating TaskState = "terminating"
-	TaskTerminated TaskState = "terminated"
-	TaskTimeout    TaskState = "timeout"
-)
-
-type RunState string
-
-const (
-	RunRunning   RunState = "running"
-	RunSucceeded RunState = "succeeded"
-	RunFailed    RunState = "failed"
-	RunTimeout   RunState = "timeout"
-)
-
-type OrchestrationEvent struct {
-	RunID     string
-	TaskID    string
-	TaskIndex int
-	Type      OrchestrationEventType
-	Message   string
-	Data      map[string]any
-	At        time.Time
-}
-
-type TaskStatus struct {
-	ID          string
-	Index       int
-	State       TaskState
-	LastMessage string
-	LastError   string
-	UpdatedAt   time.Time
-}
-
-type OrchestrationRunStatus struct {
-	RunID         string
-	State         RunState
-	StartedAt     time.Time
-	EndedAt       time.Time
-	WinnerTaskID  string
-	WinnerIndex   int
-	TerminateSent int
-	TerminateAck  int
-	Tasks         map[string]TaskStatus
-	ErrorSummary  []string
-}
-
-type OrchestrationRunConfig struct {
-	SuccessCond        SuccessCondition
-	MaxConcurrent      int
-	TerminateAckTimeout time.Duration
-	EventBuffer        int
-}
-
-type OrchestrationRunResult struct {
-	RunID    string
-	Winner   *OrchestrationRaceResult
-	Status   OrchestrationRunStatus
-}
-
-type orchestrationResultItem struct {
-	index     int
-	taskID    string
-	msgs      []openai.ChatCompletionMessageParamUnion
-	err       error
-	cancelled bool
-}
-
-type OrchestrationBus struct {
-	mu          sync.RWMutex
-	subscribers map[string]map[chan OrchestrationEvent]struct{}
-}
-
-func newOrchestrationBus() *OrchestrationBus {
-	return &OrchestrationBus{
-		subscribers: make(map[string]map[chan OrchestrationEvent]struct{}),
-	}
-}
-
-func (b *OrchestrationBus) Subscribe(runID string, buffer int) (<-chan OrchestrationEvent, func()) {
-	if buffer <= 0 {
-		buffer = 64
-	}
-	ch := make(chan OrchestrationEvent, buffer)
-
-	b.mu.Lock()
-	if b.subscribers[runID] == nil {
-		b.subscribers[runID] = make(map[chan OrchestrationEvent]struct{})
-	}
-	b.subscribers[runID][ch] = struct{}{}
-	b.mu.Unlock()
-
-	unsub := func() {
-		b.mu.Lock()
-		defer b.mu.Unlock()
-		if subs, ok := b.subscribers[runID]; ok {
-			if _, exists := subs[ch]; exists {
-				delete(subs, ch)
-				close(ch)
-			}
-			if len(subs) == 0 {
-				delete(b.subscribers, runID)
-			}
-		}
-	}
-	return ch, unsub
-}
-
-func (b *OrchestrationBus) Publish(event OrchestrationEvent) {
-	b.mu.RLock()
-	subs := b.subscribers[event.RunID]
-	for ch := range subs {
-		select {
-		case ch <- event:
-		default:
-			// Drop instead of blocking the orchestrator control path.
-		}
-	}
-	allSubs := b.subscribers["*"]
-	for ch := range allSubs {
-		select {
-		case ch <- event:
-		default:
-		}
-	}
-	b.mu.RUnlock()
-}
-
-func (o *OrchestrationAgent) SubscribeRun(runID string, buffer int) (<-chan OrchestrationEvent, func()) {
-	return o.bus.Subscribe(runID, buffer)
-}
-
-// SubscribeAllRuns subscribes to events from all runs.
-func (o *OrchestrationAgent) SubscribeAllRuns(buffer int) (<-chan OrchestrationEvent, func()) {
-	return o.bus.Subscribe("*", buffer)
-}
+// ---------------------------------------------------------------------------
+// Internal: event emission
+// ---------------------------------------------------------------------------
 
 func (o *OrchestrationAgent) emit(ev OrchestrationEvent) {
-	if ev.At.IsZero() {
-		ev.At = time.Now()
-	}
 	o.bus.Publish(ev)
 }
+
+// ---------------------------------------------------------------------------
+// Internal: run state store
+// ---------------------------------------------------------------------------
 
 func (o *OrchestrationAgent) storeRun(status *OrchestrationRunStatus) {
 	o.runsMu.Lock()
@@ -190,16 +41,6 @@ func cloneRunStatus(in *OrchestrationRunStatus) OrchestrationRunStatus {
 		out.ErrorSummary = append([]string(nil), in.ErrorSummary...)
 	}
 	return out
-}
-
-func (o *OrchestrationAgent) GetRunStatus(runID string) (OrchestrationRunStatus, bool) {
-	o.runsMu.RLock()
-	run, ok := o.runs[runID]
-	o.runsMu.RUnlock()
-	if !ok {
-		return OrchestrationRunStatus{}, false
-	}
-	return cloneRunStatus(run), true
 }
 
 func (o *OrchestrationAgent) updateTask(
@@ -246,12 +87,16 @@ func (o *OrchestrationAgent) markRunCompletion(
 	return cloneRunStatus(run)
 }
 
+// ---------------------------------------------------------------------------
+// RunManagedRace
+// ---------------------------------------------------------------------------
+
 // RunManagedRace executes race tasks with control-plane features:
-// - dynamic task startup
-// - realtime event bus updates
-// - task status table
-// - cascading termination with terminate/terminated_ack events
-// - winner aggregation and run status querying
+//   - dynamic task startup
+//   - realtime event bus updates
+//   - task status table
+//   - cascading termination with terminate/terminated_ack events
+//   - winner aggregation and run status querying
 func (o *OrchestrationAgent) RunManagedRace(
 	parentCtx context.Context,
 	tasks []RaceTask,
@@ -267,6 +112,7 @@ func (o *OrchestrationAgent) RunManagedRace(
 		cfg.TerminateAckTimeout = 10 * time.Second
 	}
 
+	// ---- initialise run status ----
 	runID := o.nextRunID()
 	runStatus := &OrchestrationRunStatus{
 		RunID:       runID,
@@ -295,6 +141,7 @@ func (o *OrchestrationAgent) RunManagedRace(
 		Message: "run started",
 	})
 
+	// ---- launch workers ----
 	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 
@@ -363,6 +210,7 @@ func (o *OrchestrationAgent) RunManagedRace(
 		close(resultCh)
 	}()
 
+	// ---- collect results ----
 	done := make([]bool, len(tasks))
 	doneCount := 0
 	winnerIndex := -1
@@ -470,6 +318,7 @@ func (o *OrchestrationAgent) RunManagedRace(
 		})
 	}
 
+	// ---- drain loop ----
 	for doneCount < len(tasks) {
 		if waitingForAck {
 			select {
@@ -503,6 +352,7 @@ func (o *OrchestrationAgent) RunManagedRace(
 		}
 	}
 
+	// ---- finalise ----
 	var finalState RunState
 	if winnerIndex >= 0 {
 		finalState = RunSucceeded
@@ -525,8 +375,8 @@ func (o *OrchestrationAgent) RunManagedRace(
 		Type:    EventRunCompleted,
 		Message: fmt.Sprintf("run completed with state=%s", finalState),
 		Data: map[string]any{
-			"winner_task":   winnerTaskID,
-			"winner_index":  winnerIndex,
+			"winner_task":    winnerTaskID,
+			"winner_index":   winnerIndex,
 			"terminate_sent": terminatedSent,
 			"terminate_ack":  terminatedAck,
 		},

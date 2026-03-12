@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 
@@ -355,4 +356,78 @@ func (a *Agent) Chat(
 
 	next = append(next, assistantMsgToParam(resp.Choices[0].Message))
 	return next, nil
+}
+
+// ---------------------------------------------------------------------------
+// ChatText  — simple non-streaming call that returns just the text content.
+// Skips the tool-calling loop; useful for classification / lightweight tasks.
+// ---------------------------------------------------------------------------
+
+func (a *Agent) ChatText(
+	ctx context.Context,
+	messages []openai.ChatCompletionMessageParamUnion,
+) (string, error) {
+	params := openai.ChatCompletionNewParams{
+		Model:    openai.ChatModel(a.config.Model),
+		Messages: messages,
+	}
+	if a.config.ExtraBody != nil {
+		params.SetExtraFields(a.config.ExtraBody)
+	}
+
+	resp, err := a.client.Chat.Completions.New(ctx, params)
+	if err != nil {
+		return "", fmt.Errorf("chat text: %w", err)
+	}
+	if len(resp.Choices) == 0 {
+		return "", nil
+	}
+	return resp.Choices[0].Message.Content, nil
+}
+
+// ---------------------------------------------------------------------------
+// StreamChat  — streaming call that returns a channel of token strings.
+// The channel is closed when the stream ends or the context is cancelled.
+// ---------------------------------------------------------------------------
+
+func (a *Agent) StreamChat(
+	ctx context.Context,
+	messages []openai.ChatCompletionMessageParamUnion,
+) <-chan string {
+	ch := make(chan string, 200)
+
+	go func() {
+		defer close(ch)
+
+		params := openai.ChatCompletionNewParams{
+			Model:    openai.ChatModel(a.config.Model),
+			Messages: messages,
+		}
+		if a.config.ExtraBody != nil {
+			params.SetExtraFields(a.config.ExtraBody)
+		}
+
+		stream := a.client.Chat.Completions.NewStreaming(ctx, params)
+
+		for stream.Next() {
+			chunk := stream.Current()
+			for _, choice := range chunk.Choices {
+				if choice.Delta.Content != "" {
+					select {
+					case ch <- choice.Delta.Content:
+					case <-ctx.Done():
+						return
+					}
+				}
+			}
+		}
+
+		if err := stream.Err(); err != nil {
+			if ctx.Err() == nil {
+				log.Printf("stream chat error: %v", err)
+			}
+		}
+	}()
+
+	return ch
 }

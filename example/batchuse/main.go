@@ -25,9 +25,9 @@ func main() {
 	}
 
 	config := tc.LLMConfig{
-		APIKey:  os.Getenv("API_KEY"),
-		Model:   os.Getenv("MODEL"),
-		BaseURL: os.Getenv("BASE_URL"),
+		APIKey:  os.Getenv("LLM_API_KEY"),
+		Model:   os.Getenv("LLM_MODEL"),
+		BaseURL: os.Getenv("LLM_BASE_URL"),
 	}
 
 	agent := tc.NewAgent(config)
