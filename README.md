@@ -7,8 +7,6 @@ A Go implementation of the `tool_calling` SDK. Built on [openai-go/v3](https://g
 - **Agent** — LLM chat with automatic tool-call loop and error retry
 - **Batch** — Run many Agent.Chat sessions concurrently with bounded parallelism
 - **BatchRace** — Run many Agent.Chat sessions concurrently and stop others immediately when one succeeds (cascading termination)
-- **OrchestrationAgent** — A higher-level wrapper that treats BatchRace as orchestration primitive
-- **Managed Orchestration Runtime** — Run IDs, realtime event bus, task status table, terminate/terminated_ack protocol
 - **Pluggable WorkerExecutor** — In-process by default; can be replaced with process/remote executors
 - **Parallel tool execution** — Multiple tool calls in a single turn are dispatched via goroutines
 
@@ -143,37 +141,6 @@ result, err := BatchRace(
 - `error` — task failed with a non-cancellation error
 - `cancelled` — task stopped by cascading cancellation
 
-### OrchestrationAgent
-
-```go
-orch := NewOrchestrationAgent(agent)
-
-tasks := []RaceTask{
-    {ID: "cs", Messages: []openai.ChatCompletionMessageParamUnion{openai.UserMessage("...")}},
-    {ID: "math", Messages: []openai.ChatCompletionMessageParamUnion{openai.UserMessage("...")}},
-}
-
-winner, err := orch.RunRaceTasks(ctx, tasks, successCond, WithEventHandler(func(e RaceEvent) {
-    fmt.Printf("[%s] agent=%d %s\n", e.Type, e.AgentID, e.Message)
-}))
-
-// Or expose BatchRace itself as a callable tool on the orchestration agent:
-orch.AddBatchRaceTool(BatchRaceToolConfig{})
-
-// Full control-plane runtime:
-result, err := orch.RunManagedRace(ctx, tasks, OrchestrationRunConfig{
-    SuccessCond:         successCond,
-    MaxConcurrent:       10,
-    TerminateAckTimeout: 5 * time.Second,
-})
-
-// Optional: replace executor (default: InProcessWorkerExecutor)
-orch.SetWorkerExecutor(InProcessWorkerExecutor{})
-status, ok := orch.GetRunStatus(result.RunID)
-events, unsub := orch.SubscribeRun(result.RunID, 256)
-defer unsub()
-```
-
 ## Migration Notes (Breaking Change)
 
 `ToolFunc` now receives `context.Context` so tools can react to timeout/cancellation:
@@ -232,7 +199,6 @@ Return full conversation history
 - **Agent** — LLM 对话 + 自动工具调用循环 + 错误自动重试
 - **Batch** — 批量并发调用多个 Agent.Chat，带信号量限流
 - **BatchRace** — 竞速并发调用，任一任务成功后立即级联终止其他任务
-- **OrchestrationAgent** — 更高层编排封装，将 BatchRace 作为编排原语
 - **并行工具执行** — 同一轮多个 tool call 通过 goroutine 并行执行
 
 ## 目录结构
@@ -360,37 +326,6 @@ result, err := BatchRace(
 - `no_match`：任务执行完成但不满足 `SuccessCondition`
 - `error`：任务出现非取消类错误
 - `cancelled`：任务被级联取消
-
-### OrchestrationAgent
-
-```go
-orch := NewOrchestrationAgent(agent)
-
-tasks := []RaceTask{
-    {ID: "cs", Messages: []openai.ChatCompletionMessageParamUnion{openai.UserMessage("...")}},
-    {ID: "math", Messages: []openai.ChatCompletionMessageParamUnion{openai.UserMessage("...")}},
-}
-
-winner, err := orch.RunRaceTasks(ctx, tasks, successCond, WithEventHandler(func(e RaceEvent) {
-    fmt.Printf("[%s] agent=%d %s\n", e.Type, e.AgentID, e.Message)
-}))
-
-// 也可以把 BatchRace 挂成编排 Agent 的一个工具：
-orch.AddBatchRaceTool(BatchRaceToolConfig{})
-
-// 完整控制面运行时（实时事件 + 状态表 + terminate/ack）：
-result, err := orch.RunManagedRace(ctx, tasks, OrchestrationRunConfig{
-    SuccessCond:         successCond,
-    MaxConcurrent:       10,
-    TerminateAckTimeout: 5 * time.Second,
-})
-
-// 可选：替换任务执行后端（默认 InProcessWorkerExecutor）
-orch.SetWorkerExecutor(InProcessWorkerExecutor{})
-status, ok := orch.GetRunStatus(result.RunID)
-events, unsub := orch.SubscribeRun(result.RunID, 256)
-defer unsub()
-```
 
 ## 迁移说明（破坏性变更）
 
