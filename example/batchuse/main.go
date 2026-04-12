@@ -1,4 +1,4 @@
-// Batch example: 50 concurrent chats, each asking for weather in two cities.
+// Batch example: 10 concurrent chats, each asking for weather in two cities.
 package main
 
 import (
@@ -28,6 +28,9 @@ func main() {
 		APIKey:  os.Getenv("LLM_API_KEY"),
 		Model:   os.Getenv("LLM_MODEL"),
 		BaseURL: os.Getenv("LLM_BASE_URL"),
+		ExtraBody: map[string]any{
+			"thinking": map[string]any{"type": "disabled"},
+		},
 	}
 
 	agent := tc.NewAgent(config)
@@ -47,14 +50,14 @@ func main() {
 		},
 	})
 
-	observations := make([][]openai.ChatCompletionMessageParamUnion, 50)
+	observations := make([][]openai.ChatCompletionMessageParamUnion, 10)
 	for i := range observations {
 		observations[i] = []openai.ChatCompletionMessageParamUnion{
 			openai.UserMessage("Get the weather for Beijing and Hangzhou. Call get_weather in parallel."),
 		}
 	}
 
-	results, err := tc.Batch(context.Background(), agent, observations, 50)
+	results, err := tc.Batch(context.Background(), agent, observations, 10)
 	if err != nil {
 		log.Fatal(err)
 	}

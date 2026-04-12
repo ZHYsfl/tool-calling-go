@@ -6,6 +6,11 @@ import (
 	"github.com/openai/openai-go/v3"
 )
 
+// RaceTask is one unit of work (message history) passed to WorkerExecutor.
+type RaceTask struct {
+	Messages []openai.ChatCompletionMessageParamUnion
+}
+
 // WorkerExecutor defines how one sub-task is executed.
 // Implementations can run in-process, out-of-process, or remotely.
 type WorkerExecutor interface {
